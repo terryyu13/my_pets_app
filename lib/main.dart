@@ -1,33 +1,20 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as path;
-import 'package:sqflite/sqflite.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
 
-  final database = await openDatabase(
-    path.join(await getDatabasesPath(), 'pet_database.db'),
-    onCreate: (db, version) {
-      return db.execute(
-        'CREATE TABLE pets(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, breed TEXT, image TEXT, description TEXT, age INTEGER)',
-      );
-    },
-    version: 1,
-  );
-
-  runApp(PetAdoptionApp(database: database));
+  runApp(PetAdoptionApp());
 }
 
 class PetAdoptionApp extends StatelessWidget {
-  final Database database;
-
-  const PetAdoptionApp({required this.database});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -35,13 +22,13 @@ class PetAdoptionApp extends StatelessWidget {
       theme: ThemeData(
         primarySwatch: Colors.blue,
       ),
-      home: PetListPage(database: database),
+      home: PetListPage(),
     );
   }
 }
 
 class Pet {
-  final int? id;
+  String? id;
   final String name;
   final String breed;
   final String? image;
@@ -81,67 +68,24 @@ class Pet {
 }
 
 class PetListPage extends StatefulWidget {
-  final Database database;
-
-  PetListPage({required this.database});
-
   @override
   _PetListPageState createState() => _PetListPageState();
 }
 
 class _PetListPageState extends State<PetListPage> {
-  List<Pet> pets = [];
+  final CollectionReference petsCollection = FirebaseFirestore.instance.collection('pets');
 
-  @override
-  void initState() {
-    super.initState();
-    fetchPets();
-  }
-
-  Future<void> fetchPets() async {
-    final Database db = widget.database;
+  Future<void> addPet(Pet newPet) async {
     try {
-      final List<Map<String, dynamic>> maps = await db.query('pets');
-      setState(() {
-        pets = List.generate(maps.length, (i) {
-          return Pet(
-            id: maps[i]['id'],
-            name: maps[i]['name'],
-            breed: maps[i]['breed'],
-            image: maps[i]['image'],
-            description: maps[i]['description'],
-            age: maps[i]['age'],
-          );
-        });
-      });
-    } catch (e) {
-      print('Error fetching pets: $e');
-    }
-  }
-
-  void addPet(Pet newPet) async {
-    final Database db = widget.database;
-    try {
-      await db.insert(
-        'pets',
-        newPet.toJson(),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      fetchPets(); // Reload pets list
+      await petsCollection.add(newPet.toJson());
     } catch (e) {
       print('Error adding pet: $e');
     }
   }
 
-  void deletePet(int id) async {
-    final Database db = widget.database;
+  Future<void> deletePet(String id) async {
     try {
-      await db.delete(
-        'pets',
-        where: 'id = ?',
-        whereArgs: [id],
-      );
-      fetchPets(); // Reload pets list
+      await petsCollection.doc(id).delete();
     } catch (e) {
       print('Error deleting pet: $e');
     }
@@ -153,51 +97,65 @@ class _PetListPageState extends State<PetListPage> {
       appBar: AppBar(
         title: Text('我的寵物'),
       ),
-      body: ListView.builder(
-        itemCount: pets.length,
-        itemBuilder: (context, index) {
-          final pet = pets[index];
-          return ListTile(
-            leading: pet.image != null && pet.image!.isNotEmpty
-                ? Image.file(File(pet.image!))
-                : Icon(Icons.pets),
-            title: Text(pet.name),
-            subtitle: Text('${pet.breed} - ${pet.age} 歲'),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => PetDetailsPage(pet: pet),
+      body: StreamBuilder(
+        stream: petsCollection.snapshots(),
+        builder: (context, AsyncSnapshot<QuerySnapshot> snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+          final pets = snapshot.data!.docs.map((doc) {
+            return Pet.fromJson(doc.data() as Map<String, dynamic>)..id = doc.id;
+          }).toList();
+          return ListView.builder(
+            itemCount: pets.length,
+            itemBuilder: (context, index) {
+              final pet = pets[index];
+              return ListTile(
+                leading: pet.image != null && pet.image!.isNotEmpty
+                    ? Image.file(File(pet.image!))
+                    : Icon(Icons.pets),
+                title: Text(pet.name),
+                subtitle: Text('${pet.breed} - ${pet.age} 歲'),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => PetDetailsPage(pet: pet),
+                    ),
+                  );
+                },
+                trailing: IconButton(
+                  icon: Icon(Icons.delete),
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: Text('確定刪除？'),
+                        content: Text('確定要刪除 ${pet.name}？'),
+                        actions: [
+                          TextButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                            },
+                            child: Text('取消'),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              deletePet(pet.id!);
+                              Navigator.pop(context);
+                            },
+                            child: Text('確定'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               );
             },
-            trailing: IconButton(
-              icon: Icon(Icons.delete),
-              onPressed: () {
-                showDialog(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: Text('確定刪除？'),
-                    content: Text('確定要刪除 ${pet.name}？'),
-                    actions: [
-                      TextButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                        },
-                        child: Text('取消'),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          deletePet(pet.id!);
-                          Navigator.pop(context);
-                        },
-                        child: Text('確定'),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
           );
         },
       ),
@@ -274,9 +232,8 @@ class _AddPetPageState extends State<AddPetPage> {
   final TextEditingController descriptionController = TextEditingController();
   final TextEditingController ageController = TextEditingController();
 
-  File? _image; // 用於存儲選擇的圖片文件
+  File? _image;
 
-  // 打開相冊並選擇圖片
   Future<void> _pickImage() async {
     final ImagePicker _picker = ImagePicker();
     final XFile? pickedFile = await _picker.pickImage(source: ImageSource.gallery);
@@ -335,7 +292,7 @@ class _AddPetPageState extends State<AddPetPage> {
                 final newPet = Pet(
                   name: nameController.text,
                   breed: breedController.text,
-                  image: _image != null ? _image!.path : null, // 使用選取的圖片路徑
+                  image: _image != null ? _image!.path : null,
                   description: descriptionController.text,
                   age: int.tryParse(ageController.text) ?? 0,
                 );
